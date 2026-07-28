@@ -1,9 +1,13 @@
-import { embed } from "../llm/gigachat.js";
+import { embedNote } from "../llm/embeddings.js";
 import { classifyNote } from "./classify.js";
 import { recognizeSpeech } from "../speech/yandex.js";
 import { insertNote, searchSimilar } from "../db/supabase.js";
 
-const SIMILARITY_THRESHOLD = 0.82; // above this, two notes are considered "the same idea" — needs tuning once real usage data exists.
+// multilingual-e5-small produces a compressed similarity range for short
+// Russian phrases (measured: truly related notes ~0.86-0.90, unrelated
+// notes still cluster at ~0.79-0.83) — 0.85 was picked from that real
+// measurement, not guessed. Revisit once there's enough real usage data.
+const SIMILARITY_THRESHOLD = 0.85;
 
 function formatDue(dueAt) {
   if (!dueAt) return null;
@@ -36,7 +40,7 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
   }
 
   const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText);
-  const embedding = await embed(env.GIGACHAT_AUTH_KEY, cleanText);
+  const embedding = await embedNote(cleanText);
 
   const note = await insertNote(env, { telegramUserId, text: cleanText, type, embedding, dueAt });
 

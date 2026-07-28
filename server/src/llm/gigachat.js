@@ -103,12 +103,12 @@ export async function chat({ authKey, messages, temperature = 0.7 }) {
 }
 
 /**
- * Vector embedding for a piece of text, used for semantic search (pgvector).
+ * Vector embedding for a piece of text.
  *
- * DRAFT — not yet verified against a live account. Sber's embeddings model
- * name and response shape should be double-checked in the current
- * developers.sber.ru docs the first time this actually runs (same class of
- * risk as the auth port gotcha above — Sber has moved things before).
+ * UNUSED — kept for reference only. Confirmed by an actual live request
+ * that this endpoint returns 402 Payment Required on the free personal
+ * (GIGACHAT_API_PERS) tier, so the app uses a self-hosted open-source model
+ * instead — see src/llm/embeddings.js.
  *
  * @param {string} authKey
  * @param {string} text

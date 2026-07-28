@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { processIncomingMessage } from "./src/notes/process.js";
 import { handleCommand } from "./src/notes/commands.js";
-import { embed } from "./src/llm/gigachat.js";
+import { embedQuery } from "./src/llm/embeddings.js";
 import { getFeed, getTasks, searchSimilar, getNotesSince } from "./src/db/supabase.js";
 import { sendMessage, downloadFile, validateInitData } from "./src/notify/telegram.js";
 import { buildDigestText } from "./src/reminders/scheduler.js";
@@ -74,7 +74,7 @@ app.get("/api/search", async (req, res) => {
   const q = req.query.q;
   if (!q) return res.status(400).json({ error: "missing q" });
   try {
-    const embedding = await embed(process.env.GIGACHAT_AUTH_KEY, q);
+    const embedding = await embedQuery(q);
     res.json(await searchSimilar(process.env, req.telegramUserId, embedding, 10));
   } catch (err) {
     res.status(500).json({ error: err.message });
