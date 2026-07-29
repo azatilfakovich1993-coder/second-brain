@@ -92,3 +92,23 @@ export async function getNotesSince(env, telegramUserId, sinceIso) {
   if (error) throw new Error(`getNotesSince failed: ${error.message}`);
   return data;
 }
+
+const DEFAULT_TIMEZONE = "Europe/Samara";
+
+/** The user's chosen IANA timezone (set via /timezone), or the default if never set. */
+export async function getUserTimezone(env, telegramUserId) {
+  const { data, error } = await getClient(env)
+    .from("user_settings")
+    .select("timezone")
+    .eq("telegram_user_id", telegramUserId)
+    .maybeSingle();
+  if (error) throw new Error(`getUserTimezone failed: ${error.message}`);
+  return data?.timezone ?? DEFAULT_TIMEZONE;
+}
+
+export async function setUserTimezone(env, telegramUserId, timezone) {
+  const { error } = await getClient(env)
+    .from("user_settings")
+    .upsert({ telegram_user_id: telegramUserId, timezone });
+  if (error) throw new Error(`setUserTimezone failed: ${error.message}`);
+}

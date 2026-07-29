@@ -1,8 +1,5 @@
 import { chat } from "../llm/gigachat.js";
 
-const TIMEZONE = "Europe/Moscow";
-const TZ_OFFSET = "+03:00"; // Russia has had no DST since 2014 — this offset is always constant, no seasonal edge cases to handle.
-
 const WEEKDAY_INDEX = {
   воскресенье: 0,
   понедельник: 1,
@@ -17,9 +14,22 @@ function pad(n) {
   return String(n).padStart(2, "0");
 }
 
-function getMoscowParts(date = new Date()) {
+/**
+ * UTC offset for an IANA zone as "+04:00" — computed live instead of a
+ * fixed constant, since the user isn't always in the same zone (travels
+ * between e.g. Samara/Moscow/Vladivostok) and each has a different offset.
+ * Russia has had no DST since 2014, so a zone's offset is constant for any
+ * given date — no seasonal edge cases to handle.
+ */
+function getUtcOffset(timezone, date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "longOffset" }).formatToParts(date);
+  const gmt = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+00:00";
+  return gmt.replace("GMT", "") || "+00:00";
+}
+
+function getTzParts(timezone, date = new Date()) {
   const formatter = new Intl.DateTimeFormat("ru-RU", {
-    timeZone: TIMEZONE,
+    timeZone: timezone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -40,19 +50,21 @@ function getMoscowParts(date = new Date()) {
   };
 }
 
-function addDaysToMoscowDate(nowParts, days) {
-  const anchor = new Date(`${nowParts.year}-${pad(nowParts.month)}-${pad(nowParts.day)}T12:00:00${TZ_OFFSET}`);
+function addDaysInTz(timezone, nowParts, days) {
+  const offset = getUtcOffset(timezone);
+  const anchor = new Date(`${nowParts.year}-${pad(nowParts.month)}-${pad(nowParts.day)}T12:00:00${offset}`);
   const shifted = new Date(anchor.getTime() + days * 24 * 3600 * 1000);
-  return getMoscowParts(shifted);
+  return getTzParts(timezone, shifted);
 }
 
-function buildSystemPrompt() {
-  const now = getMoscowParts();
+function buildSystemPrompt(timezone) {
+  const now = getTzParts(timezone);
   const todayLabel = `${now.year}-${pad(now.month)}-${pad(now.day)} ${pad(now.hour)}:${pad(now.minute)} (${now.weekday})`;
+  const offset = getUtcOffset(timezone);
 
   return `Ты разбираешь голосовую заметку пользователя (уже переведённую в текст) на структурированную запись для личной базы заметок.
 
-Сейчас в Москве: ${todayLabel}, часовой пояс UTC+3.
+Сейчас у пользователя: ${todayLabel}, часовой пояс UTC${offset}.
 
 ВАЖНО: не пытайся сам вычислять итоговую дату — просто извлеки, ЧТО именно сказал пользователь, в одном из простых форматов ниже. Дату посчитает код, не ты.
 
@@ -64,7 +76,7 @@ function buildSystemPrompt() {
 Если type=task, укажи WHEN_KIND и WHEN_VALUE:
 - weekday — если назван день недели ("в четверг"): WHEN_VALUE = само название дня недели (например "четверг").
 - relative_days — если "сегодня"/"завтра"/"послезавтра": WHEN_VALUE = число дней (0/1/2).
-- relative_hours — если "через N часов/минут": WHEN_VALUE = число часов (дробное для минут, например 0.5 для получаса).
+- relative_hours — если "через N часов" ИЛИ "через N минут": WHEN_VALUE = число часов, дробное для минут (например 0.5 для получаса, 0.05 для 3 минут). НЕ используй никакую другую категорию для минут — только relative_hours с дробным числом.
 - date — если названа конкретная дата: WHEN_VALUE в формате ДД.ММ или ДД.ММ.ГГГГ.
 - none — если срок не назван вовсе.
 
@@ -83,7 +95,7 @@ function extractField(raw, name) {
   return match ? match[1].trim() : null;
 }
 
-function resolveDueDate({ whenKind, whenValue, time }) {
+function resolveDueDate(timezone, { whenKind, whenValue, time }) {
   if (!whenKind || whenKind === "none") return null;
 
   // The model inconsistently wraps the number in extra text — seen live as
@@ -102,18 +114,29 @@ function resolveDueDate({ whenKind, whenValue, time }) {
     return new Date(Date.now() + hours * 3600 * 1000).toISOString();
   }
 
-  const now = getMoscowParts();
+  // The model doesn't reliably stick to the enum in the prompt — confirmed
+  // live it invented "relative_minutes" for "через 3 минуты" instead of the
+  // instructed relative_hours-as-a-fraction, silently dropping the
+  // reminder. Handle the variant defensively rather than trust the prompt
+  // to never drift again.
+  if (whenKind === "relative_minutes") {
+    const minutes = leadingNumber(whenValue);
+    if (!Number.isFinite(minutes)) return null;
+    return new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  }
+
+  const now = getTzParts(timezone);
   let target;
 
   if (whenKind === "relative_days") {
     const days = leadingNumber(whenValue);
     if (!Number.isFinite(days)) return null;
-    target = addDaysToMoscowDate(now, days);
+    target = addDaysInTz(timezone, now, days);
   } else if (whenKind === "weekday") {
     const targetDow = WEEKDAY_INDEX[whenValue?.toLowerCase()];
     if (targetDow === undefined) return null;
     const diff = (targetDow - now.weekdayIndex + 7) % 7;
-    target = addDaysToMoscowDate(now, diff);
+    target = addDaysInTz(timezone, now, diff);
   } else if (whenKind === "date") {
     const m = whenValue?.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/);
     if (!m) return null;
@@ -124,11 +147,12 @@ function resolveDueDate({ whenKind, whenValue, time }) {
 
   const timeMatch = time?.match(/^(\d{1,2}):(\d{2})$/);
   const [hh, mm] = timeMatch ? [Number(timeMatch[1]), Number(timeMatch[2])] : [9, 0];
-  const iso = `${target.year}-${pad(target.month)}-${pad(target.day)}T${pad(hh)}:${pad(mm)}:00${TZ_OFFSET}`;
+  const offset = getUtcOffset(timezone);
+  const iso = `${target.year}-${pad(target.month)}-${pad(target.day)}T${pad(hh)}:${pad(mm)}:00${offset}`;
   return new Date(iso).toISOString();
 }
 
-function parse(raw, originalText) {
+function parse(timezone, raw, originalText) {
   const type = extractField(raw, "TYPE")?.toLowerCase();
   const whenKind = extractField(raw, "WHEN_KIND")?.toLowerCase();
   const whenValue = extractField(raw, "WHEN_VALUE");
@@ -137,7 +161,7 @@ function parse(raw, originalText) {
 
   return {
     type: ["task", "idea", "note"].includes(type) ? type : "note",
-    dueAt: resolveDueDate({ whenKind, whenValue, time }),
+    dueAt: resolveDueDate(timezone, { whenKind, whenValue, time }),
     // The model occasionally truncates its answer before reaching TEXT:
     // (confirmed while testing) — fall back to the original transcribed
     // message rather than leaking raw model formatting into a note's text.
@@ -148,15 +172,16 @@ function parse(raw, originalText) {
 /**
  * @param {string} authKey
  * @param {string} rawText - transcribed voice note or typed message
+ * @param {string} [timezone] - IANA zone, e.g. "Europe/Samara" (default) or "Asia/Vladivostok"
  */
-export async function classifyNote(authKey, rawText) {
+export async function classifyNote(authKey, rawText, timezone = "Europe/Samara") {
   const raw = await chat({
     authKey,
     messages: [
-      { role: "system", content: buildSystemPrompt() },
+      { role: "system", content: buildSystemPrompt(timezone) },
       { role: "user", content: rawText },
     ],
     temperature: 0.3,
   });
-  return parse(raw, rawText);
+  return parse(timezone, raw, rawText);
 }

@@ -29,15 +29,15 @@ while (true) {
 
     console.log(`\nПолучено: "${message.text}"`);
 
-    const commandReply = handleCommand(message.text);
-    if (commandReply) {
+    if (message.text.startsWith("/")) {
+      const commandReply = await handleCommand(message.text, process.env, message.chat.id);
       console.log(commandReply);
       await sendMessage(process.env, message.chat.id, commandReply);
       continue;
     }
 
     const { type, dueAt, text } = await classifyNote(process.env.GIGACHAT_AUTH_KEY, message.text);
-    const reply = [`Тип: ${type}`, dueAt ? `Срок: ${new Date(dueAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}` : null, `Текст: ${text}`]
+    const reply = [`Тип: ${type}`, dueAt ? `Срок: ${new Date(dueAt).toLocaleString("ru-RU", { timeZone: "Europe/Samara" })}` : null, `Текст: ${text}`]
       .filter(Boolean)
       .join("\n");
     console.log(reply);

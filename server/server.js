@@ -3,7 +3,7 @@ import express from "express";
 import { processIncomingMessage } from "./src/notes/process.js";
 import { handleCommand } from "./src/notes/commands.js";
 import { embedQuery } from "./src/llm/embeddings.js";
-import { getFeed, getTasks, searchSimilar, getNotesSince } from "./src/db/supabase.js";
+import { getFeed, getTasks, searchSimilar, getNotesSince, getUserTimezone } from "./src/db/supabase.js";
 import { sendMessage, downloadFile, validateInitData } from "./src/notify/telegram.js";
 import { buildDigestText } from "./src/reminders/scheduler.js";
 import { startSchedulers } from "./src/reminders/scheduler.js";
@@ -24,7 +24,8 @@ app.post("/telegram/webhook", async (req, res) => {
 
   try {
     if (message.text?.startsWith("/")) {
-      await sendMessage(process.env, telegramUserId, handleCommand(message.text));
+      const reply = await handleCommand(message.text, process.env, telegramUserId);
+      await sendMessage(process.env, telegramUserId, reply);
       return;
     }
 
@@ -85,11 +86,12 @@ app.get("/api/digest", async (req, res) => {
   try {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
-    const [notesToday, openTasks] = await Promise.all([
+    const [notesToday, openTasks, timezone] = await Promise.all([
       getNotesSince(process.env, req.telegramUserId, startOfDay.toISOString()),
       getTasks(process.env, req.telegramUserId),
+      getUserTimezone(process.env, req.telegramUserId),
     ]);
-    res.json({ text: buildDigestText(notesToday, openTasks), notesToday, openTasks });
+    res.json({ text: buildDigestText(notesToday, openTasks, timezone), notesToday, openTasks });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

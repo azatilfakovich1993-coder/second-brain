@@ -1,7 +1,7 @@
 import { embedNote } from "../llm/embeddings.js";
 import { classifyNote } from "./classify.js";
 import { recognizeSpeech } from "../speech/yandex.js";
-import { insertNote, searchSimilar } from "../db/supabase.js";
+import { insertNote, searchSimilar, getUserTimezone } from "../db/supabase.js";
 
 // Measured against real Russian phrases on the HF-hosted MiniLM model: a
 // genuinely related note scored 0.77, unrelated ones stayed at 0.16-0.31 —
@@ -9,10 +9,10 @@ import { insertNote, searchSimilar } from "../db/supabase.js";
 // 0.55 leaves a wide safety margin either way. Revisit with real usage data.
 const SIMILARITY_THRESHOLD = 0.55;
 
-function formatDue(dueAt) {
+function formatDue(dueAt, timezone) {
   if (!dueAt) return null;
   return new Date(dueAt).toLocaleString("ru-RU", {
-    timeZone: "Europe/Moscow",
+    timeZone: timezone,
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -39,7 +39,8 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
     return { reply: "Не расслышал, можешь повторить?" };
   }
 
-  const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText);
+  const timezone = await getUserTimezone(env, telegramUserId);
+  const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText, timezone);
   console.log(`classified "${rawText}" ->`, { type, dueAt, cleanText }); // deliberately kept in prod — date-parsing bugs have twice been invisible without this
   const embedding = await embedNote(env, cleanText);
 
@@ -56,7 +57,7 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
   }
 
   const lines = [`${TYPE_LABEL[type]}: ${cleanText}`];
-  if (dueAt) lines.push(`Напомню: ${formatDue(dueAt)}`);
+  if (dueAt) lines.push(`Напомню: ${formatDue(dueAt, timezone)}`);
   if (related.length > 0) {
     lines.push("", "Похоже на то, что ты уже говорил:");
     for (const r of related) lines.push(`— ${r.text}`);

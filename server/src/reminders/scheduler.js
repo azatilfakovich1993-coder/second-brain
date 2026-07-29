@@ -1,5 +1,5 @@
 import cron from "node-cron";
-import { getDueReminders, markStatus, getAllUserIds, getNotesSince, getTasks } from "../db/supabase.js";
+import { getDueReminders, markStatus, getAllUserIds, getNotesSince, getTasks, getUserTimezone } from "../db/supabase.js";
 import { sendMessage } from "../notify/telegram.js";
 
 /** Checks every minute for reminders whose time has come and sends them. */
@@ -23,7 +23,7 @@ function startReminderJob(env) {
   });
 }
 
-export function buildDigestText(notesToday, openTasks) {
+export function buildDigestText(notesToday, openTasks, timezone) {
   const ideas = notesToday.filter((n) => n.type === "idea").length;
   const tasksAdded = notesToday.filter((n) => n.type === "task").length;
   const notes = notesToday.filter((n) => n.type === "note").length;
@@ -33,7 +33,7 @@ export function buildDigestText(notesToday, openTasks) {
     lines.push("", "Ближайшие задачи:");
     for (const t of openTasks.slice(0, 5)) {
       const when = t.due_at
-        ? new Date(t.due_at).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+        ? new Date(t.due_at).toLocaleString("ru-RU", { timeZone: timezone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
         : "без срока";
       lines.push(`— ${t.text} (${when})`);
     }
@@ -41,7 +41,14 @@ export function buildDigestText(notesToday, openTasks) {
   return lines.join("\n");
 }
 
-/** Sends a short "here's what you captured today" digest at 21:00 Moscow time. */
+/**
+ * Sends a short "here's what you captured today" digest, fired once daily
+ * at 21:00 Samara time. NOTE: this is a single fixed trigger for everyone —
+ * a user in a different zone (e.g. Vladivostok, +6h from Samara) gets their
+ * digest at their local 3am, not 21:00. Fine for a single-user personal
+ * bot; would need a per-user schedule (not one shared cron) to fix properly
+ * if this ever supports multiple people in different zones at once.
+ */
 function startDigestJob(env) {
   cron.schedule(
     "0 21 * * *",
@@ -59,18 +66,19 @@ function startDigestJob(env) {
 
       for (const userId of userIds) {
         try {
-          const [notesToday, openTasks] = await Promise.all([
+          const [notesToday, openTasks, timezone] = await Promise.all([
             getNotesSince(env, userId, startOfDay.toISOString()),
             getTasks(env, userId),
+            getUserTimezone(env, userId),
           ]);
           if (notesToday.length === 0) continue; // nothing captured today — skip the digest for this user
-          await sendMessage(env, userId, buildDigestText(notesToday, openTasks));
+          await sendMessage(env, userId, buildDigestText(notesToday, openTasks, timezone));
         } catch (err) {
           console.error(`digest failed for user ${userId}:`, err.message);
         }
       }
     },
-    { timezone: "Europe/Moscow" }
+    { timezone: "Europe/Samara" }
   );
 }
 
