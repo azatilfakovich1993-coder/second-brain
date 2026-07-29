@@ -66,6 +66,11 @@ export async function markStatus(env, id, status) {
   if (error) throw new Error(`markStatus failed: ${error.message}`);
 }
 
+export async function updateNoteDueDate(env, id, dueAt) {
+  const { error } = await getClient(env).from("notes").update({ due_at: dueAt }).eq("id", id);
+  if (error) throw new Error(`updateNoteDueDate failed: ${error.message}`);
+}
+
 export async function searchSimilar(env, telegramUserId, embedding, matchCount = 5) {
   const { data, error } = await getClient(env).rpc("match_notes", {
     query_embedding: embedding,
@@ -111,6 +116,26 @@ export async function setUserTimezone(env, telegramUserId, timezone) {
     .from("user_settings")
     .upsert({ telegram_user_id: telegramUserId, timezone });
   if (error) throw new Error(`setUserTimezone failed: ${error.message}`);
+}
+
+/** Tracks "I just asked this user when to remind them about note X" so the
+ * next message can be interpreted as answering that, instead of either
+ * silently losing the reminder or filing the answer as its own note. */
+export async function getPendingNoteId(env, telegramUserId) {
+  const { data, error } = await getClient(env)
+    .from("user_settings")
+    .select("pending_note_id")
+    .eq("telegram_user_id", telegramUserId)
+    .maybeSingle();
+  if (error) throw new Error(`getPendingNoteId failed: ${error.message}`);
+  return data?.pending_note_id ?? null;
+}
+
+export async function setPendingNoteId(env, telegramUserId, noteId) {
+  const { error } = await getClient(env)
+    .from("user_settings")
+    .upsert({ telegram_user_id: telegramUserId, pending_note_id: noteId });
+  if (error) throw new Error(`setPendingNoteId failed: ${error.message}`);
 }
 
 /** Short-term conversation memory — lets the classifier tell a fresh note

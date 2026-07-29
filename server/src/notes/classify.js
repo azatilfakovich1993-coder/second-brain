@@ -235,3 +235,45 @@ export async function classifyNote(authKey, rawText, timezone = "Europe/Samara",
   });
   return parse(timezone, raw, rawText);
 }
+
+/**
+ * Focused follow-up to "Когда напомнить?" — extracts a due date/time from
+ * the user's answer, or null if the reply doesn't actually specify a time
+ * (e.g. "без напоминания", or the user just moved on to something else).
+ * Deliberately separate from classifyNote's general-purpose prompt: asking
+ * one narrow question gets a much more reliable answer than folding this
+ * into the bigger reply/query/note decision.
+ *
+ * @returns {Promise<string|null>} ISO due date, or null if no time was given
+ */
+export async function extractDueDateFromReply(authKey, rawText, timezone = "Europe/Samara") {
+  const now = getTzParts(timezone);
+  const todayLabel = `${now.year}-${pad(now.month)}-${pad(now.day)} ${pad(now.hour)}:${pad(now.minute)} (${now.weekday})`;
+  const offset = getUtcOffset(timezone);
+
+  const prompt = `Ты только что спросил пользователя "Когда напомнить?" про задачу без указанного срока. Вот его ответ. Извлеки срок в том же формате, что обычно:
+
+Сейчас у пользователя: ${todayLabel}, часовой пояс UTC${offset}.
+
+WHEN_KIND: <weekday|relative_days|relative_hours|date|none>
+WHEN_VALUE: <значение или none>
+TIME: <ЧЧ:ММ или none>
+
+Если ответ НЕ про время (например "без напоминания", "не надо", "потом", или явно другая мысль) — верни WHEN_KIND: none.
+relative_hours покрывает и минуты (дробное число часов, например 0.05 для 3 минут) — никогда не используй другую категорию для минут.
+Ответь СТРОГО этими тремя строками, без лишнего текста.`;
+
+  const raw = await chat({
+    authKey,
+    messages: [
+      { role: "system", content: prompt },
+      { role: "user", content: rawText },
+    ],
+    temperature: 0.2,
+  });
+
+  const whenKind = extractField(raw, "WHEN_KIND")?.toLowerCase();
+  const whenValue = extractField(raw, "WHEN_VALUE");
+  const time = extractField(raw, "TIME");
+  return resolveDueDate(timezone, { whenKind, whenValue, time });
+}
