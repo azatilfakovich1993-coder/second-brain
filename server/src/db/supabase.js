@@ -112,3 +112,22 @@ export async function setUserTimezone(env, telegramUserId, timezone) {
     .upsert({ telegram_user_id: telegramUserId, timezone });
   if (error) throw new Error(`setUserTimezone failed: ${error.message}`);
 }
+
+/** Short-term conversation memory — lets the classifier tell a fresh note
+ * apart from a reply/follow-up to the bot's own previous message. */
+export async function addConversationTurn(env, telegramUserId, role, content) {
+  const { error } = await getClient(env).from("conversation_turns").insert({ telegram_user_id: telegramUserId, role, content });
+  if (error) throw new Error(`addConversationTurn failed: ${error.message}`);
+}
+
+/** Most recent turns, oldest first (ready to feed straight into a prompt). */
+export async function getRecentTurns(env, telegramUserId, limit = 6) {
+  const { data, error } = await getClient(env)
+    .from("conversation_turns")
+    .select("role, content")
+    .eq("telegram_user_id", telegramUserId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`getRecentTurns failed: ${error.message}`);
+  return data.reverse();
+}

@@ -1,7 +1,16 @@
 import { embedNote } from "../llm/embeddings.js";
-import { classifyNote } from "./classify.js";
+import { classifyNote, getStartOfDayIso } from "./classify.js";
 import { recognizeSpeech } from "../speech/yandex.js";
-import { insertNote, searchSimilar, getUserTimezone } from "../db/supabase.js";
+import {
+  insertNote,
+  searchSimilar,
+  getUserTimezone,
+  getRecentTurns,
+  addConversationTurn,
+  getNotesSince,
+  getTasks,
+  getFeed,
+} from "../db/supabase.js";
 
 // Measured against real Russian phrases on the HF-hosted MiniLM model: a
 // genuinely related note scored 0.77, unrelated ones stayed at 0.16-0.31 —
@@ -22,30 +31,38 @@ function formatDue(dueAt, timezone) {
 
 const TYPE_LABEL = { task: "Задача", idea: "Идея", note: "Заметка" };
 
-// Confirmed live: a bare "да" sent as a reply to the bot's own message got
-// classified as its own empty note ("нет информации для заметки") — the
-// pipeline has no conversation memory, so a short acknowledgement has no
-// content to attach to. Rather than build full conversation-history
-// tracking (a bigger feature), just refuse to file these as notes at all.
-const FILLER_WORDS = new Set([
-  "да", "нет", "ок", "окей", "хорошо", "ладно", "угу", "ага", "неа",
-  "ясно", "понял", "поняла", "спасибо", "пожалуйста", "привет", "ну", "давай",
-]);
+/**
+ * "Какие у меня заметки за сегодня?" etc. — the model can't know what's
+ * actually stored, so KIND=query only tells us WHAT to look up; the actual
+ * answer comes from a real database read, not a guess (confirmed live: for
+ * this exact phrase, without this branch the model invented a bogus note
+ * with a fake reminder attached instead of admitting it doesn't know).
+ */
+async function buildQueryReply(env, telegramUserId, scope, timezone) {
+  if (scope === "tasks") {
+    const tasks = await getTasks(env, telegramUserId);
+    if (tasks.length === 0) return "Активных задач нет.";
+    return ["Твои задачи:", ...tasks.map((t) => `— ${t.text}${t.due_at ? ` (${formatDue(t.due_at, timezone)})` : ""}`)].join("\n");
+  }
 
-function isJustFiller(text) {
-  const words = text
-    .toLowerCase()
-    .replace(/[.,!?;:]/g, "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  return words.length > 0 && words.length <= 3 && words.every((w) => FILLER_WORDS.has(w));
+  if (scope === "today") {
+    const notesToday = await getNotesSince(env, telegramUserId, getStartOfDayIso(timezone));
+    if (notesToday.length === 0) return "Сегодня пока ничего не сохранено.";
+    return ["Сегодня:", ...notesToday.map((n) => `— ${TYPE_LABEL[n.type] ?? n.type}: ${n.text}`)].join("\n");
+  }
+
+  const feed = await getFeed(env, telegramUserId, 10);
+  if (feed.length === 0) return "Пока нет ни одной заметки.";
+  return ["Последнее сохранённое:", ...feed.map((n) => `— ${TYPE_LABEL[n.type] ?? n.type}: ${n.text}`)].join("\n");
 }
 
 /**
  * Handles one incoming Telegram message (voice or text) end-to-end:
- * transcribe (if voice) -> classify -> embed -> store -> find related past
- * notes -> return a short reply string for the bot to send back.
+ * transcribe (if voice) -> classify (with recent conversation history, so
+ * a short follow-up like "да" or "какую?" is recognized as a reply rather
+ * than filed as its own garbage note — confirmed live that without history
+ * these produced nonsense like "Заметка: непонятно, о чём идёт речь") ->
+ * store (for real notes) -> find related past notes -> reply.
  *
  * @param {object} env
  * @param {object} input
@@ -59,15 +76,29 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
     return { reply: "Не расслышал, можешь повторить?" };
   }
 
-  if (isJustFiller(rawText)) {
-    return { reply: "Не понял, о чём речь — можешь сформулировать мысль целиком?" };
+  const [timezone, history] = await Promise.all([
+    getUserTimezone(env, telegramUserId),
+    getRecentTurns(env, telegramUserId, 6),
+  ]);
+
+  const result = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText, timezone, history);
+  console.log(`classified "${rawText}" ->`, result); // deliberately kept in prod — date-parsing bugs have twice been invisible without this
+
+  await addConversationTurn(env, telegramUserId, "user", rawText);
+
+  if (result.kind === "reply") {
+    await addConversationTurn(env, telegramUserId, "assistant", result.answer);
+    return { reply: result.answer };
   }
 
-  const timezone = await getUserTimezone(env, telegramUserId);
-  const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText, timezone);
-  console.log(`classified "${rawText}" ->`, { type, dueAt, cleanText }); // deliberately kept in prod — date-parsing bugs have twice been invisible without this
-  const embedding = await embedNote(env, cleanText);
+  if (result.kind === "query") {
+    const queryReply = await buildQueryReply(env, telegramUserId, result.scope, timezone);
+    await addConversationTurn(env, telegramUserId, "assistant", queryReply);
+    return { reply: queryReply };
+  }
 
+  const { type, dueAt, text: cleanText } = result;
+  const embedding = await embedNote(env, cleanText);
   const note = await insertNote(env, { telegramUserId, text: cleanText, type, embedding, dueAt });
 
   let related = [];
@@ -86,6 +117,9 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
     lines.push("", "Похоже на то, что ты уже говорил:");
     for (const r of related) lines.push(`— ${r.text}`);
   }
+  const replyText = lines.join("\n");
 
-  return { reply: lines.join("\n"), note, related };
+  await addConversationTurn(env, telegramUserId, "assistant", replyText);
+
+  return { reply: replyText, note, related };
 }

@@ -14,6 +14,14 @@ function pad(n) {
   return String(n).padStart(2, "0");
 }
 
+/** Start of "today" in the given timezone, as an ISO instant — for querying
+ * "what did I capture today" correctly regardless of the server's own TZ. */
+export function getStartOfDayIso(timezone, date = new Date()) {
+  const now = getTzParts(timezone, date);
+  const offset = getUtcOffset(timezone, date);
+  return new Date(`${now.year}-${pad(now.month)}-${pad(now.day)}T00:00:00${offset}`).toISOString();
+}
+
 /**
  * UTC offset for an IANA zone as "+04:00" — computed live instead of a
  * fixed constant, since the user isn't always in the same zone (travels
@@ -57,23 +65,40 @@ function addDaysInTz(timezone, nowParts, days) {
   return getTzParts(timezone, shifted);
 }
 
-function buildSystemPrompt(timezone) {
+function buildSystemPrompt(timezone, lastAssistantTurn) {
   const now = getTzParts(timezone);
   const todayLabel = `${now.year}-${pad(now.month)}-${pad(now.day)} ${pad(now.hour)}:${pad(now.minute)} (${now.weekday})`;
   const offset = getUtcOffset(timezone);
 
-  return `Ты разбираешь голосовую заметку пользователя (уже переведённую в текст) на структурированную запись для личной базы заметок.
+  // Inferring "this is answering my previous question" purely from the raw
+  // text of a short message like "какую?" is unreliable (confirmed live —
+  // the model still filed it as a note even with history shown). Telling
+  // it directly whenever the last thing *it* said ended in "?" is a much
+  // stronger, structurally-known signal than hoping it re-derives that
+  // from context.
+  const lastWasQuestion = lastAssistantTurn?.trim().endsWith("?");
+
+  return `Ты разбираешь сообщения пользователя в его личном "втором мозге" — приложении для голосовых заметок и напоминаний.
 
 Сейчас у пользователя: ${todayLabel}, часовой пояс UTC${offset}.
+${lastAssistantTurn ? "\nТебе показана история последних сообщений переписки — используй её, чтобы понять контекст." : ""}
+${lastWasQuestion ? `\nВАЖНО: твоё последнее сообщение в истории было уточняющим вопросом ("${lastAssistantTurn.trim()}"). Новое сообщение пользователя почти наверняка отвечает именно на этот вопрос — это KIND=reply, а не новая заметка.` : ""}
 
-ВАЖНО: не пытайся сам вычислять итоговую дату — просто извлеки, ЧТО именно сказал пользователь, в одном из простых форматов ниже. Дату посчитает код, не ты.
+СНАЧАЛА реши, что это за сообщение:
+- note — самостоятельная мысль, задача, идея или заметка, которую нужно сохранить в базу.
+- reply — короткий ответ/уточнение/реакция на твоё же предыдущее сообщение (например "да", "какую?", "напомни снова про это") — НЕ новая мысль для сохранения, а часть диалога.
+- query — пользователь просит ПОКАЗАТЬ то, что уже сохранено (например "какие у меня заметки за сегодня", "что у меня на завтра", "покажи мои задачи") — ты НЕ знаешь, что реально сохранено, поэтому НЕ придумывай ответ и НЕ сохраняй это как заметку.
 
-Определи тип записи:
-- task — есть конкретное действие, которое нужно сделать (со сроком или без).
-- idea — мысль, идея, наблюдение на будущее, без конкретного действия/срока.
-- note — просто заметка, список, факт для памяти.
+Если KIND=query — ты не отвечаешь сам, код сам найдёт данные. Укажи только область поиска:
+KIND: query
+SCOPE: <today|tasks|all>
+(today — про сегодня, tasks — про задачи/дела, all — если неясно или просят "всё")
 
-Если type=task, укажи WHEN_KIND и WHEN_VALUE:
+Если KIND=reply — ответь пользователю по существу и по-человечески, опираясь на историю переписки. Формат:
+KIND: reply
+ANSWER: <твой ответ одной-двумя короткими фразами>
+
+Если KIND=note — разбери саму мысль. Если type=task, укажи WHEN_KIND и WHEN_VALUE:
 - weekday — если назван день недели ("в четверг"): WHEN_VALUE = само название дня недели (например "четверг").
 - relative_days — если "сегодня"/"завтра"/"послезавтра": WHEN_VALUE = число дней (0/1/2).
 - relative_hours — если "через N часов" ИЛИ "через N минут": WHEN_VALUE = число часов, дробное для минут (например 0.5 для получаса, 0.05 для 3 минут). НЕ используй никакую другую категорию для минут — только relative_hours с дробным числом.
@@ -82,12 +107,17 @@ function buildSystemPrompt(timezone) {
 
 TIME — конкретное время суток, если названо (формат ЧЧ:ММ), иначе "none". Для relative_hours всегда "none".
 
-Ответь СТРОГО в этом формате — ВСЕГДА все строки:
+Формат для KIND=note — ВСЕГДА все строки:
+KIND: note
 TYPE: <task|idea|note>
 WHEN_KIND: <weekday|relative_days|relative_hours|date|none>
 WHEN_VALUE: <значение или none>
 TIME: <ЧЧ:ММ или none>
-TEXT: <краткая очищенная формулировка заметки, без "надо не забыть" и т.п. — сама суть>`;
+TEXT: <краткая очищенная формулировка заметки, без "надо не забыть" и т.п. — сама суть>
+
+Не пытайся сам вычислять итоговую дату — просто извлеки, ЧТО сказал пользователь, дату посчитает код.
+
+ВАЖНО: никогда не останавливайся после одной строки KIND — всегда дописывай все строки формата для выбранного варианта (для reply — обязательно строку ANSWER, для query — обязательно SCOPE, для note — все поля).`;
 }
 
 function extractField(raw, name) {
@@ -153,6 +183,21 @@ function resolveDueDate(timezone, { whenKind, whenValue, time }) {
 }
 
 function parse(timezone, raw, originalText) {
+  const kind = extractField(raw, "KIND")?.toLowerCase();
+
+  if (kind === "reply") {
+    const answerMatch = raw.match(/ANSWER\s*[:=]\s*([\s\S]+)/i);
+    return {
+      kind: "reply",
+      answer: answerMatch ? answerMatch[1].trim().split("\n")[0] : "Не совсем понял — можешь сформулировать иначе?",
+    };
+  }
+
+  if (kind === "query") {
+    const scope = extractField(raw, "SCOPE")?.toLowerCase();
+    return { kind: "query", scope: ["today", "tasks", "all"].includes(scope) ? scope : "all" };
+  }
+
   const type = extractField(raw, "TYPE")?.toLowerCase();
   const whenKind = extractField(raw, "WHEN_KIND")?.toLowerCase();
   const whenValue = extractField(raw, "WHEN_VALUE");
@@ -160,6 +205,7 @@ function parse(timezone, raw, originalText) {
   const textMatch = raw.match(/TEXT\s*[:=]\s*([\s\S]+)/i);
 
   return {
+    kind: "note",
     type: ["task", "idea", "note"].includes(type) ? type : "note",
     dueAt: resolveDueDate(timezone, { whenKind, whenValue, time }),
     // The model occasionally truncates its answer before reaching TEXT:
@@ -173,12 +219,16 @@ function parse(timezone, raw, originalText) {
  * @param {string} authKey
  * @param {string} rawText - transcribed voice note or typed message
  * @param {string} [timezone] - IANA zone, e.g. "Europe/Samara" (default) or "Asia/Vladivostok"
+ * @param {Array<{role:'user'|'assistant', content:string}>} [history] - recent conversation turns, oldest first
+ * @returns {Promise<{kind:'reply', answer:string} | {kind:'query', scope:'today'|'tasks'|'all'} | {kind:'note', type:string, dueAt:string|null, text:string}>}
  */
-export async function classifyNote(authKey, rawText, timezone = "Europe/Samara") {
+export async function classifyNote(authKey, rawText, timezone = "Europe/Samara", history = []) {
+  const lastAssistantTurn = [...history].reverse().find((h) => h.role === "assistant")?.content;
   const raw = await chat({
     authKey,
     messages: [
-      { role: "system", content: buildSystemPrompt(timezone) },
+      { role: "system", content: buildSystemPrompt(timezone, lastAssistantTurn) },
+      ...history.map((h) => ({ role: h.role, content: h.content })),
       { role: "user", content: rawText },
     ],
     temperature: 0.3,
