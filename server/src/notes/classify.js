@@ -86,8 +86,16 @@ function extractField(raw, name) {
 function resolveDueDate({ whenKind, whenValue, time }) {
   if (!whenKind || whenKind === "none") return null;
 
+  // The model sometimes appends a parenthetical explanation after the
+  // number (confirmed live: "0.0833333...  (5 минут)") — Number() turns
+  // that into NaN, so pull out just the leading numeric part instead.
+  const leadingNumber = (str) => {
+    const match = str?.match(/^-?[\d.]+/);
+    return match ? parseFloat(match[0]) : NaN;
+  };
+
   if (whenKind === "relative_hours") {
-    const hours = Number(whenValue);
+    const hours = leadingNumber(whenValue);
     if (!Number.isFinite(hours)) return null;
     return new Date(Date.now() + hours * 3600 * 1000).toISOString();
   }
@@ -96,7 +104,7 @@ function resolveDueDate({ whenKind, whenValue, time }) {
   let target;
 
   if (whenKind === "relative_days") {
-    const days = Number(whenValue);
+    const days = leadingNumber(whenValue);
     if (!Number.isFinite(days)) return null;
     target = addDaysToMoscowDate(now, days);
   } else if (whenKind === "weekday") {
