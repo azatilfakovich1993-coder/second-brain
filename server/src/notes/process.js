@@ -22,6 +22,26 @@ function formatDue(dueAt, timezone) {
 
 const TYPE_LABEL = { task: "Задача", idea: "Идея", note: "Заметка" };
 
+// Confirmed live: a bare "да" sent as a reply to the bot's own message got
+// classified as its own empty note ("нет информации для заметки") — the
+// pipeline has no conversation memory, so a short acknowledgement has no
+// content to attach to. Rather than build full conversation-history
+// tracking (a bigger feature), just refuse to file these as notes at all.
+const FILLER_WORDS = new Set([
+  "да", "нет", "ок", "окей", "хорошо", "ладно", "угу", "ага", "неа",
+  "ясно", "понял", "поняла", "спасибо", "пожалуйста", "привет", "ну", "давай",
+]);
+
+function isJustFiller(text) {
+  const words = text
+    .toLowerCase()
+    .replace(/[.,!?;:]/g, "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return words.length > 0 && words.length <= 3 && words.every((w) => FILLER_WORDS.has(w));
+}
+
 /**
  * Handles one incoming Telegram message (voice or text) end-to-end:
  * transcribe (if voice) -> classify -> embed -> store -> find related past
@@ -37,6 +57,10 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
   const rawText = voiceBuffer ? await recognizeSpeech(env, voiceBuffer) : text;
   if (!rawText?.trim()) {
     return { reply: "Не расслышал, можешь повторить?" };
+  }
+
+  if (isJustFiller(rawText)) {
+    return { reply: "Не понял, о чём речь — можешь сформулировать мысль целиком?" };
   }
 
   const timezone = await getUserTimezone(env, telegramUserId);
