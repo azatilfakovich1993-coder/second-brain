@@ -40,6 +40,7 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
   }
 
   const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText);
+  console.log(`classified "${rawText}" ->`, { type, dueAt, cleanText }); // deliberately kept in prod — date-parsing bugs have twice been invisible without this
   const embedding = await embedNote(env, cleanText);
 
   const note = await insertNote(env, { telegramUserId, text: cleanText, type, embedding, dueAt });

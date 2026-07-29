@@ -86,11 +86,13 @@ function extractField(raw, name) {
 function resolveDueDate({ whenKind, whenValue, time }) {
   if (!whenKind || whenKind === "none") return null;
 
-  // The model sometimes appends a parenthetical explanation after the
-  // number (confirmed live: "0.0833333...  (5 минут)") — Number() turns
-  // that into NaN, so pull out just the leading numeric part instead.
+  // The model inconsistently wraps the number in extra text — seen live as
+  // a trailing "(5 минут)" — and there's no guarantee the number is always
+  // the first token, so search anywhere in the string instead of anchoring
+  // to the start (an earlier ^-anchored version still failed on a later
+  // real message).
   const leadingNumber = (str) => {
-    const match = str?.match(/^-?[\d.]+/);
+    const match = str?.match(/-?\d+(\.\d+)?/);
     return match ? parseFloat(match[0]) : NaN;
   };
 
