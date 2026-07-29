@@ -1,36 +1,43 @@
-import { pipeline } from "@xenova/transformers";
-
 /**
- * Self-hosted embeddings — GigaChat's embeddings endpoint turned out to
- * require a paid tier (confirmed by an actual 402 Payment Required response
- * on the free personal account), so semantic search runs on a small
- * open-source multilingual model instead: zero ongoing cost, runs in this
- * same Node process, no external API. Model downloads once (~120MB) and is
- * cached on first use.
+ * Embeddings via the Hugging Face Inference API (hosted, free) instead of
+ * running the model in this process — a real 706MB RSS measurement showed
+ * ONNX runtime's fixed overhead alone blows past Render's free 512MB
+ * limit, regardless of how small the model file itself is. Offloading the
+ * actual inference to Hugging Face's servers keeps this process light
+ * enough to fit.
  *
- * multilingual-e5 models expect a "query: " / "passage: " prefix convention
- * for best retrieval quality — a note being stored is a "passage", a search
- * typed by the user is a "query".
+ * sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2: multilingual
+ * (incl. Russian), 384-dim, returns an already mean-pooled sentence vector
+ * from the feature-extraction endpoint (no manual pooling or query/passage
+ * prefixing needed, unlike e5-style models).
  */
-let embedderPromise = null;
+const HF_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+// api-inference.huggingface.co no longer resolves (confirmed via DNS lookup) —
+// HF migrated the Inference API to router.huggingface.co ("Inference Providers").
+// Path order matters: /models/{id}/pipeline/feature-extraction works,
+// /pipeline/feature-extraction/{id} (the old api-inference shape) 404s here.
+const HF_API_URL = `https://router.huggingface.co/hf-inference/models/${HF_MODEL}/pipeline/feature-extraction`;
 
-function getEmbedder() {
-  if (!embedderPromise) {
-    embedderPromise = pipeline("feature-extraction", "Xenova/multilingual-e5-small");
+async function embedText(env, text) {
+  const res = await fetch(HF_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.HF_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ inputs: text, options: { wait_for_model: true } }),
+  });
+  const data = await res.json();
+  if (data.error) {
+    throw new Error(`Hugging Face Inference API error: ${data.error}`);
   }
-  return embedderPromise;
+  return data;
 }
 
-async function embedText(prefixedText) {
-  const embedder = await getEmbedder();
-  const output = await embedder(prefixedText, { pooling: "mean", normalize: true });
-  return Array.from(output.data);
+export function embedNote(env, text) {
+  return embedText(env, text);
 }
 
-export function embedNote(text) {
-  return embedText(`passage: ${text}`);
-}
-
-export function embedQuery(text) {
-  return embedText(`query: ${text}`);
+export function embedQuery(env, text) {
+  return embedText(env, text);
 }

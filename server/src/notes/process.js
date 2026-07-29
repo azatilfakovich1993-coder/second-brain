@@ -3,11 +3,11 @@ import { classifyNote } from "./classify.js";
 import { recognizeSpeech } from "../speech/yandex.js";
 import { insertNote, searchSimilar } from "../db/supabase.js";
 
-// multilingual-e5-small produces a compressed similarity range for short
-// Russian phrases (measured: truly related notes ~0.86-0.90, unrelated
-// notes still cluster at ~0.79-0.83) — 0.85 was picked from that real
-// measurement, not guessed. Revisit once there's enough real usage data.
-const SIMILARITY_THRESHOLD = 0.85;
+// Measured against real Russian phrases on the HF-hosted MiniLM model: a
+// genuinely related note scored 0.77, unrelated ones stayed at 0.16-0.31 —
+// much better separation than the earlier local e5-small model gave, so
+// 0.55 leaves a wide safety margin either way. Revisit with real usage data.
+const SIMILARITY_THRESHOLD = 0.55;
 
 function formatDue(dueAt) {
   if (!dueAt) return null;
@@ -40,7 +40,7 @@ export async function processIncomingMessage(env, { telegramUserId, text, voiceB
   }
 
   const { type, dueAt, text: cleanText } = await classifyNote(env.GIGACHAT_AUTH_KEY, rawText);
-  const embedding = await embedNote(cleanText);
+  const embedding = await embedNote(env, cleanText);
 
   const note = await insertNote(env, { telegramUserId, text: cleanText, type, embedding, dueAt });
 

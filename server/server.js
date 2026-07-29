@@ -74,7 +74,7 @@ app.get("/api/search", async (req, res) => {
   const q = req.query.q;
   if (!q) return res.status(400).json({ error: "missing q" });
   try {
-    const embedding = await embedQuery(q);
+    const embedding = await embedQuery(process.env, q);
     res.json(await searchSimilar(process.env, req.telegramUserId, embedding, 10));
   } catch (err) {
     res.status(500).json({ error: err.message });
